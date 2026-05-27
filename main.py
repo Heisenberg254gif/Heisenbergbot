@@ -1,14 +1,13 @@
 import asyncio
+import html
 import logging
 import re
+import requests
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ChatType, ParseMode
 from aiogram.filters import CommandStart
 from aiogram.types import Message
-
-from google import genai
-from google.genai import types
 
 from config import BOT_TOKEN, GOOGLE_API_KEY
 
@@ -22,25 +21,45 @@ SYSTEM_INSTRUCTION = (
 )
 
 MODEL = "gemini-1.5-flash"
+GEMINI_URL = (
+    f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
+)
 
 # Matches:
 #   "Хайзенберг, ...", "Хайзенберг ...", any case, allows extra spaces.
 TRIGGER_RE = re.compile(r"^\s*хайзенберг(?:\s*,\s*|\s+)(?P<prompt>.*)$", re.IGNORECASE)
 
 
-genai_client = genai.Client(api_key=GOOGLE_API_KEY)
-
-
 async def generate_answer(prompt: str) -> str:
     def _sync_call() -> str:
-        resp = genai_client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-            ),
+        payload = {
+            "system_instruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]},
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": prompt}],
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.8,
+            },
+        }
+        response = requests.post(
+            GEMINI_URL,
+            params={"key": GOOGLE_API_KEY},
+            json=payload,
+            timeout=60,
         )
-        return (resp.text or "").strip()
+        response.raise_for_status()
+        data = response.json()
+
+        candidates = data.get("candidates") or []
+        if not candidates:
+            return ""
+
+        parts = ((candidates[0].get("content") or {}).get("parts")) or []
+        chunks = [part.get("text", "") for part in parts if isinstance(part, dict)]
+        return "".join(chunks).strip()
 
     return await asyncio.to_thread(_sync_call)
 
@@ -83,7 +102,7 @@ async def handle_group_message(message: Message) -> None:
         await message.reply("Нечего добавить.", parse_mode=ParseMode.HTML)
         return
 
-    await message.reply(answer, parse_mode=ParseMode.HTML)
+    await message.reply(html.escape(answer))
 
 
 async def main() -> None:
